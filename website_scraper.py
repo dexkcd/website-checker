@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import time
 import re
+import os
 from typing import List, Dict, Set
 from agents import Agent, Runner
 import json
@@ -14,12 +15,16 @@ from config import (
 
 
 class WebsiteScraper:
-    def __init__(self):
+    def __init__(self, screenshots_dir: str = "screenshots"):
         self.visited_urls: Set[str] = set()
         self.scraped_data: List[Dict] = []
         self.playwright = None
         self.browser: Browser = None
         self.context = None
+        self.screenshots_dir = screenshots_dir
+        
+        # Create screenshots directory if it doesn't exist
+        os.makedirs(self.screenshots_dir, exist_ok=True)
         
     def normalize_url(self, url: str) -> str:
         """Normalize URL to ensure it's properly formatted"""
@@ -150,6 +155,13 @@ class WebsiteScraper:
             current_url = page.url
             print(f"✅ Successfully loaded: {current_url}")
             
+            # Take screenshot
+            print("📸 Taking screenshot...")
+            screenshot_filename = f"screenshot_{len(self.scraped_data) + 1}_{int(time.time())}.png"
+            screenshot_path = os.path.join(self.screenshots_dir, screenshot_filename)
+            page.screenshot(path=screenshot_path, full_page=True)
+            print(f"📸 Screenshot saved: {screenshot_path}")
+            
             # Get page content
             print("📖 Getting page content...")
             content = page.content()
@@ -193,6 +205,8 @@ class WebsiteScraper:
                 'meta_description': meta_description,
                 'links': links,
                 'word_count': len(main_content.split()),
+                'screenshot_path': screenshot_path,
+                'screenshot_filename': screenshot_filename,
                 'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S')
             }
             
@@ -257,9 +271,126 @@ class WebsiteScraper:
             self.close_browser()
 
 
+class SectionBasedAnalyzer:
+    def __init__(self, sections_config_path: str = "settings/crawl_sections.json"):
+        self.sections_config = self.load_sections_config(sections_config_path)
+        self.scraper = WebsiteScraper()
+        
+    def load_sections_config(self, config_path: str) -> Dict:
+        """Load the sections configuration from JSON file"""
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            print(f"⚠️ Sections config file not found: {config_path}")
+            return {"sections": []}
+        except Exception as e:
+            print(f"❌ Error loading sections config: {e}")
+            return {"sections": []}
+    
+    def analyze_content_for_sections(self, scraped_data: List[Dict], organization_name: str = "") -> Dict:
+        """Analyze scraped content and organize it by sections"""
+        print("🔍 Analyzing content for sections...")
+        
+        # Prepare all content for analysis
+        all_content = ""
+        for page in scraped_data:
+            if 'content' in page and 'error' not in page:
+                all_content += f"\n\n--- Page: {page['title']} ({page['url']}) ---\n"
+                all_content += page['content']
+        
+        # Replace organization name placeholder
+        sections = []
+        for section in self.sections_config.get('sections', []):
+            section_name = section['section_name']
+            if '[organization name]' in section_name and organization_name:
+                section_name = section_name.replace('[organization name]', organization_name)
+            
+            # Process subsections
+            subsections = []
+            for subsection in section.get('subsection', []):
+                subsection_name = subsection['subsection_name']
+                if '[organization name]' in subsection_name and organization_name:
+                    subsection_name = subsection_name.replace('[organization name]', organization_name)
+                
+                # Find relevant pages for this subsection
+                relevant_pages = self.find_relevant_pages(
+                    scraped_data, 
+                    subsection['subsection_definition'],
+                    subsection_name
+                )
+                
+                subsections.append({
+                    'subsection_name': subsection_name,
+                    'subsection_definition': subsection['subsection_definition'],
+                    'relevant_pages': relevant_pages
+                })
+            
+            sections.append({
+                'section_name': section_name,
+                'section_definition': section['section_definition'],
+                'subsections': subsections
+            })
+        
+        return {
+            'organization_name': organization_name,
+            'sections': sections,
+            'total_pages_scraped': len(scraped_data),
+            'analysis_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+    
+    def find_relevant_pages(self, scraped_data: List[Dict], subsection_definition: str, subsection_name: str) -> List[Dict]:
+        """Find pages relevant to a specific subsection"""
+        relevant_pages = []
+        
+        # Simple keyword-based matching (can be enhanced with AI)
+        keywords = self.extract_keywords(subsection_definition, subsection_name)
+        
+        for page in scraped_data:
+            if 'error' in page:
+                continue
+                
+            content = page.get('content', '').lower()
+            title = page.get('title', '').lower()
+            
+            # Check if page contains relevant keywords
+            relevance_score = 0
+            for keyword in keywords:
+                if keyword in content or keyword in title:
+                    relevance_score += 1
+            
+            if relevance_score > 0:
+                relevant_pages.append({
+                    'page_title': page.get('title', 'No title'),
+                    'url': page.get('actual_url', page.get('url', '')),
+                    'content': page.get('content', '')[:1000] + '...' if len(page.get('content', '')) > 1000 else page.get('content', ''),
+                    'screenshot_path': page.get('screenshot_path', ''),
+                    'screenshot_filename': page.get('screenshot_filename', ''),
+                    'relevance_score': relevance_score,
+                    'word_count': page.get('word_count', 0)
+                })
+        
+        # Sort by relevance score
+        relevant_pages.sort(key=lambda x: x['relevance_score'], reverse=True)
+        return relevant_pages[:5]  # Return top 5 most relevant pages
+    
+    def extract_keywords(self, definition: str, name: str) -> List[str]:
+        """Extract keywords from subsection definition and name"""
+        text = f"{name} {definition}".lower()
+        
+        # Remove common words and extract meaningful keywords
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'about', 'over', 'under', 'through', 'during', 'before', 'after', 'above', 'below', 'up', 'down', 'out', 'off', 'again', 'further', 'then', 'once'}
+        
+        words = re.findall(r'\b\w+\b', text)
+        keywords = [word for word in words if len(word) > 3 and word not in stop_words]
+        
+        return list(set(keywords))  # Remove duplicates
+
+
 class UniversityInfoAgent:
     def __init__(self):
         self.scraper = WebsiteScraper()
+        self.section_analyzer = SectionBasedAnalyzer()
         self.agent = Agent(
             name="University Information Collector",
             instructions="""
@@ -316,21 +447,39 @@ class UniversityInfoAgent:
             raise error[0]
         return result[0]
     
-    def collect_university_info(self, university_url: str, max_pages: int = 20) -> Dict:
-        """Main method to collect university information"""
+    def collect_university_info(self, university_url: str, max_pages: int = 20, organization_name: str = "") -> Dict:
+        """Main method to collect university information with section-based analysis"""
         print(f"Starting to collect information from: {university_url}")
         
         # Scrape the website
         scraped_data = self.scraper.crawl_website(university_url, max_pages)
         
-        # Prepare data for the agent
+        # Extract organization name from first page if not provided
+        if not organization_name and scraped_data:
+            first_page = scraped_data[0]
+            if 'title' in first_page and 'error' not in first_page:
+                # Try to extract organization name from title
+                title = first_page['title']
+                # Remove common suffixes
+                for suffix in [' - Home', ' | Home', ' - Official', ' | Official', ' - University', ' | University']:
+                    if title.endswith(suffix):
+                        organization_name = title[:-len(suffix)]
+                        break
+                if not organization_name:
+                    organization_name = title
+        
+        # Run section-based analysis
+        print("📊 Running section-based analysis...")
+        section_analysis = self.section_analyzer.analyze_content_for_sections(scraped_data, organization_name)
+        
+        # Also run traditional AI analysis for comparison
+        print("🤖 Running traditional AI analysis...")
         combined_content = ""
         for page in scraped_data:
             if 'content' in page and 'error' not in page:
                 combined_content += f"\n\n--- Page: {page['title']} ({page['url']}) ---\n"
                 combined_content += page['content'][:2000]  # Limit content per page
         
-        # Use the agent to analyze and structure the information
         prompt = f"""
         Analyze the following university website content and extract relevant information in a structured format.
         
@@ -343,19 +492,20 @@ class UniversityInfoAgent:
         Please provide a comprehensive analysis with verbatim quotes where relevant.
         """
         
-        print("🤖 Running AI analysis...")
         try:
             result = self._run_agent_in_thread(prompt)
-            analysis_output = result.final_output
+            traditional_analysis = result.final_output
         except Exception as e:
-            print(f"⚠️ AI analysis failed: {e}")
-            analysis_output = f"AI analysis failed: {str(e)}\n\nRaw scraped data is still available below."
+            print(f"⚠️ Traditional AI analysis failed: {e}")
+            traditional_analysis = f"Traditional AI analysis failed: {str(e)}"
         
         return {
             'university_url': university_url,
+            'organization_name': organization_name,
             'scraped_pages': len(scraped_data),
             'raw_data': scraped_data,
-            'structured_analysis': analysis_output,
+            'section_analysis': section_analysis,
+            'traditional_analysis': traditional_analysis,
             'collection_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
         }
     

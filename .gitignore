@@ -60,6 +60,12 @@ Thumbs.db
 university_data_*.json
 university_summary_*.csv
 
+# Screenshots
+screenshots/
+*.png
+*.jpg
+*.jpeg
+
 # Logs
 *.log
 logs/

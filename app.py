@@ -66,6 +66,42 @@ def check_api_key():
         return False
     return True
 
+def display_section_analysis(section_analysis):
+    """Display the section-based analysis results"""
+    sections = section_analysis.get('sections', [])
+    
+    for i, section in enumerate(sections):
+        st.markdown(f"### {i+1}. {section['section_name']}")
+        st.markdown(f"*{section['section_definition']}*")
+        
+        subsections = section.get('subsections', [])
+        for j, subsection in enumerate(subsections):
+            st.markdown(f"#### {i+1}.{j+1} {subsection['subsection_name']}")
+            st.markdown(f"*{subsection['subsection_definition']}*")
+            
+            relevant_pages = subsection.get('relevant_pages', [])
+            if relevant_pages:
+                for k, page in enumerate(relevant_pages):
+                    with st.expander(f"📄 {page['page_title']} (Relevance: {page['relevance_score']})"):
+                        col1, col2 = st.columns([2, 1])
+                        
+                        with col1:
+                            st.markdown(f"**URL:** {page['url']}")
+                            st.markdown(f"**Word Count:** {page['word_count']}")
+                            st.markdown("**Content:**")
+                            st.text_area("", page['content'], height=200, key=f"content_{i}_{j}_{k}")
+                        
+                        with col2:
+                            if page.get('screenshot_path') and os.path.exists(page['screenshot_path']):
+                                st.markdown("**Screenshot:**")
+                                st.image(page['screenshot_path'], caption=page['page_title'], use_column_width=True)
+                            else:
+                                st.markdown("📷 *Screenshot not available*")
+            else:
+                st.info("No relevant pages found for this subsection.")
+        
+        st.markdown("---")
+
 def display_results(data):
     """Display the collected university information"""
     st.markdown("## 📊 Collection Results")
@@ -83,11 +119,26 @@ def display_results(data):
         successful_pages = len([page for page in data['raw_data'] if 'error' not in page])
         st.metric("Successful Pages", successful_pages)
     
-    # Structured analysis
-    st.markdown("## 🎓 AI Analysis Results")
-    st.markdown('<div class="success-box">', unsafe_allow_html=True)
-    st.markdown(data['structured_analysis'])
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Organization name
+    if data.get('organization_name'):
+        st.markdown(f"### 🏢 {data['organization_name']}")
+    
+    # Section-based analysis
+    if 'section_analysis' in data:
+        st.markdown("## 📋 Section-Based Analysis")
+        display_section_analysis(data['section_analysis'])
+    
+    # Traditional analysis
+    if 'traditional_analysis' in data:
+        st.markdown("## 🤖 Traditional AI Analysis")
+        st.markdown('<div class="success-box">', unsafe_allow_html=True)
+        st.markdown(data['traditional_analysis'])
+        st.markdown('</div>', unsafe_allow_html=True)
+    elif 'structured_analysis' in data:
+        st.markdown("## 🎓 AI Analysis Results")
+        st.markdown('<div class="success-box">', unsafe_allow_html=True)
+        st.markdown(data['structured_analysis'])
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # Raw data tabs
     st.markdown("## 📋 Raw Data")
@@ -100,10 +151,12 @@ def display_results(data):
             if 'error' not in page:
                 # Show the actual URL that was loaded
                 display_url = page.get('actual_url', page.get('normalized_url', page.get('url', '')))
+                screenshot_status = "✅" if page.get('screenshot_path') else "❌"
                 summary_data.append({
                     'Title': page.get('title', 'No title'),
                     'URL': display_url,
                     'Word Count': page.get('word_count', 0),
+                    'Screenshot': screenshot_status,
                     'Status': 'Success'
                 })
             else:
@@ -111,6 +164,7 @@ def display_results(data):
                     'Title': 'Error',
                     'URL': page.get('url', ''),
                     'Word Count': 0,
+                    'Screenshot': '❌',
                     'Status': f"Error: {page.get('error', 'Unknown error')}"
                 })
         
@@ -123,15 +177,25 @@ def display_results(data):
         for i, page in enumerate(data['raw_data']):
             with st.expander(f"Page {i+1}: {page.get('title', 'No title')}"):
                 if 'error' not in page:
-                    st.write(f"**Original URL:** {page.get('url', '')}")
-                    if page.get('normalized_url') and page.get('normalized_url') != page.get('url'):
-                        st.write(f"**Normalized URL:** {page.get('normalized_url', '')}")
-                    if page.get('actual_url') and page.get('actual_url') != page.get('normalized_url'):
-                        st.write(f"**Actual URL Loaded:** {page.get('actual_url', '')}")
-                    st.write(f"**Word Count:** {page.get('word_count', 0)}")
-                    st.write(f"**Scraped At:** {page.get('scraped_at', '')}")
-                    st.write("**Content:**")
-                    st.text_area("", page.get('content', ''), height=200, key=f"content_{i}")
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.write(f"**Original URL:** {page.get('url', '')}")
+                        if page.get('normalized_url') and page.get('normalized_url') != page.get('url'):
+                            st.write(f"**Normalized URL:** {page.get('normalized_url', '')}")
+                        if page.get('actual_url') and page.get('actual_url') != page.get('normalized_url'):
+                            st.write(f"**Actual URL Loaded:** {page.get('actual_url', '')}")
+                        st.write(f"**Word Count:** {page.get('word_count', 0)}")
+                        st.write(f"**Scraped At:** {page.get('scraped_at', '')}")
+                        st.write("**Content:**")
+                        st.text_area("", page.get('content', ''), height=200, key=f"content_{i}")
+                    
+                    with col2:
+                        if page.get('screenshot_path') and os.path.exists(page.get('screenshot_path')):
+                            st.write("**Screenshot:**")
+                            st.image(page.get('screenshot_path'), caption=page.get('title', 'No title'), use_column_width=True)
+                        else:
+                            st.write("📷 *Screenshot not available*")
                 else:
                     st.error(f"Error scraping this page: {page.get('error', 'Unknown error')}")
     
@@ -194,6 +258,13 @@ def main():
             help="Enter the main URL of the university website you want to analyze"
         )
         
+        # Organization name input
+        organization_name = st.text_input(
+            "🏢 Organization Name (Optional)",
+            placeholder="Stanford University",
+            help="Enter the organization name to customize section titles"
+        )
+        
         # Max pages to scrape
         max_pages = st.slider(
             "📄 Maximum Pages to Scrape",
@@ -248,7 +319,7 @@ def main():
                     status_text.text("Scraping website content...")
                     
                     # Collect information
-                    results = agent.collect_university_info(university_url, max_pages)
+                    results = agent.collect_university_info(university_url, max_pages, organization_name)
                     
                     progress_bar.progress(75)
                     status_text.text("Analyzing content with AI...")
