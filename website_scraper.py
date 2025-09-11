@@ -15,16 +15,67 @@ from config import (
 
 
 class WebsiteScraper:
-    def __init__(self, screenshots_dir: str = "screenshots"):
+    def __init__(self, screenshots_dir: str = "screenshots", enable_link_filtering: bool = True):
         self.visited_urls: Set[str] = set()
         self.scraped_data: List[Dict] = []
         self.playwright = None
         self.browser: Browser = None
         self.context = None
         self.screenshots_dir = screenshots_dir
+        self.enable_link_filtering = enable_link_filtering
+        self.link_relevance_agent = LinkRelevanceAgent() if enable_link_filtering else None
+        self.target_sections = None
         
         # Create screenshots directory if it doesn't exist
         os.makedirs(self.screenshots_dir, exist_ok=True)
+    
+    def set_target_sections(self, sections: List[Dict]):
+        """Set target sections for link relevance evaluation"""
+        self.target_sections = sections
+    
+    def filter_links_by_relevance(self, links: List[str], current_page_title: str = "", 
+                                 current_page_content: str = "", context_text: str = "") -> List[Dict]:
+        """Filter links based on relevance using AI agent"""
+        if not self.enable_link_filtering or not self.link_relevance_agent:
+            # Return all links as relevant if filtering is disabled
+            return [{'url': link, 'relevance_score': 5, 'is_worth_checking': True} for link in links]
+        
+        relevant_links = []
+        print(f"🔍 Filtering {len(links)} links for relevance...")
+        
+        for i, link in enumerate(links):
+            try:
+                # Get context around the link (this would need to be passed from the scraping method)
+                link_context = context_text if context_text else f"Link {i+1} from {current_page_title}"
+                
+                # Evaluate link relevance
+                evaluation = self.link_relevance_agent.evaluate_link_relevance(
+                    url=link,
+                    context=link_context,
+                    current_page_title=current_page_title,
+                    current_page_content=current_page_content,
+                    target_sections=self.target_sections
+                )
+                
+                # Only include links that are worth checking
+                if evaluation.get('is_worth_checking', False):
+                    relevant_links.append(evaluation)
+                    print(f"✅ Link approved: {link} (Score: {evaluation.get('relevance_score', 0)})")
+                else:
+                    print(f"❌ Link rejected: {link} (Score: {evaluation.get('relevance_score', 0)})")
+                    
+            except Exception as e:
+                print(f"⚠️ Error evaluating link {link}: {e}")
+                # Include link by default if evaluation fails
+                relevant_links.append({
+                    'url': link, 
+                    'relevance_score': 5, 
+                    'is_worth_checking': True,
+                    'reasoning': f"Evaluation failed: {str(e)}"
+                })
+        
+        print(f"📊 Link filtering complete: {len(relevant_links)}/{len(links)} links approved")
+        return relevant_links
         
     def normalize_url(self, url: str) -> str:
         """Normalize URL to ensure it's properly formatted"""
@@ -175,15 +226,35 @@ class WebsiteScraper:
             main_content = self.extract_text_content(soup)
             
             # Extract links for further crawling
-            links = []
+            raw_links = []
+            link_contexts = []
             for link in soup.find_all('a', href=True):
                 href = link['href']
                 # Use the normalized URL for joining
                 full_url = urljoin(normalized_url, href)
                 if self.is_valid_url(full_url, normalized_url):
-                    links.append(full_url)
+                    raw_links.append(full_url)
+                    # Extract context around the link
+                    link_text = link.get_text(strip=True)
+                    parent_text = link.parent.get_text(strip=True) if link.parent else ""
+                    context = f"Link text: '{link_text}' | Parent context: '{parent_text[:200]}'"
+                    link_contexts.append(context)
             
-            print(f"🔗 Found {len(links)} valid links on this page")
+            print(f"🔗 Found {len(raw_links)} valid links on this page")
+            
+            # Filter links by relevance if enabled
+            if self.enable_link_filtering and self.link_relevance_agent:
+                filtered_links_data = self.filter_links_by_relevance(
+                    raw_links, 
+                    current_page_title=title_text,
+                    current_page_content=main_content,
+                    context_text="\n".join(link_contexts)
+                )
+                # Extract just the URLs from the filtered data
+                links = [link_data['url'] for link_data in filtered_links_data]
+                print(f"🎯 After relevance filtering: {len(links)} links approved for crawling")
+            else:
+                links = raw_links
             
             # Extract meta information
             meta_description = ""
@@ -223,10 +294,15 @@ class WebsiteScraper:
                 'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S')
             }
     
-    def crawl_website(self, start_url: str, max_pages: int = MAX_PAGES_TO_SCRAPE) -> List[Dict]:
+    def crawl_website(self, start_url: str, max_pages: int = MAX_PAGES_TO_SCRAPE, target_sections: List[Dict] = None) -> List[Dict]:
         """Crawl website starting from start_url using Playwright"""
         self.visited_urls.clear()
         self.scraped_data.clear()
+        
+        # Set target sections for link relevance evaluation
+        if target_sections:
+            self.set_target_sections(target_sections)
+            print(f"🎯 Target sections set for link relevance evaluation")
         
         try:
             # Normalize the start URL
@@ -271,10 +347,192 @@ class WebsiteScraper:
             self.close_browser()
 
 
+class PageAnalystAgent:
+    def __init__(self):
+        self.agent = Agent(
+            name="PageRelevanceAnalyst",
+            instructions="""
+            You are a specialized AI agent that analyzes web pages to determine their relevance to specific organizational sections.
+            
+            Your task is to:
+            1. Analyze page content and determine how well it fits specific section categories
+            2. Provide detailed reasoning for your relevance assessments
+            3. Score pages on a scale of 1-10 for each section
+            4. Identify key themes and topics that make a page relevant
+            5. Extract specific quotes that support your analysis
+            
+            For each page analysis, provide:
+            - Relevance score (1-10) for each section
+            - Detailed reasoning explaining why the page is or isn't relevant
+            - Key themes and topics found
+            - Supporting quotes from the content
+            - Confidence level in your assessment (high/medium/low)
+            
+            Be thorough and analytical in your assessments. Consider both explicit mentions and implicit themes.
+            """
+        )
+    
+    def _run_agent_in_thread(self, prompt: str):
+        """Run the page analyst agent in a separate thread with its own event loop"""
+        import threading
+        import asyncio
+
+        result = [None]
+        error = [None]
+
+        def run_agent():
+            try:
+                # Create a new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                # Run the agent
+                result[0] = Runner.run_sync(self.agent, prompt)
+
+            except Exception as e:
+                error[0] = e
+                print(f"Error running page analyst agent: {e}")
+            finally:
+                if 'loop' in locals():
+                    loop.close()
+
+        # Run in a separate thread
+        thread = threading.Thread(target=run_agent)
+        thread.start()
+        thread.join()
+
+        if error[0]:
+            raise error[0]
+        return result[0]
+    
+    def analyze_section_pages(self, section: Dict, subsection: Dict, all_pages: List[Dict]) -> List[Dict]:
+        """Analyze which pages belong to a specific section/subsection using AI"""
+        try:
+            section_name = section['section_name']
+            section_definition = section['section_definition']
+            subsection_name = subsection['subsection_name']
+            subsection_definition = subsection['subsection_definition']
+            
+            # Prepare all pages for analysis
+            pages_text = ""
+            for i, page in enumerate(all_pages):
+                if 'error' in page:
+                    continue
+                pages_text += f"\n{i+1}. {page.get('title', 'No title')}\n"
+                pages_text += f"   URL: {page.get('url', '')}\n"
+                pages_text += f"   Content: {page.get('content', '')[:1500]}...\n"
+            
+            prompt = f"""
+            You are analyzing which web pages belong to a specific organizational section and subsection.
+            
+            SECTION TO CLASSIFY FOR:
+            Section: {section_name}
+            Section Definition: {section_definition}
+            
+            Subsection: {subsection_name}
+            Subsection Definition: {subsection_definition}
+            
+            PAGES TO EVALUATE:
+            {pages_text}
+            
+            For each page, determine:
+            1. Does this page belong to the "{subsection_name}" subsection? (Yes/No)
+            2. If yes, what is the relevance score (1-10, where 10 is highly relevant)?
+            3. Detailed reasoning for your decision
+            4. Key themes/topics that make it relevant (or not)
+            5. Supporting quotes from the content
+            6. Confidence level in your assessment (high/medium/low)
+            
+            Format your response as JSON with this structure:
+            {{
+                "section_name": "{section_name}",
+                "subsection_name": "{subsection_name}",
+                "relevant_pages": [
+                    {{
+                        "page_title": "Page Title",
+                        "page_url": "https://example.com",
+                        "belongs_to_subsection": true,
+                        "relevance_score": 8,
+                        "reasoning": "Detailed explanation of why this page belongs to this subsection...",
+                        "key_themes": ["theme1", "theme2"],
+                        "supporting_quotes": ["quote1", "quote2"],
+                        "confidence": "high"
+                    }},
+                    {{
+                        "page_title": "Another Page",
+                        "page_url": "https://example.com/page2",
+                        "belongs_to_subsection": false,
+                        "relevance_score": 2,
+                        "reasoning": "This page does not contain information relevant to this subsection...",
+                        "key_themes": [],
+                        "supporting_quotes": [],
+                        "confidence": "high"
+                    }}
+                ]
+            }}
+            """
+            
+            print(f"🤖 Analyzing section '{subsection_name}' for relevant pages...")
+            result = self._run_agent_in_thread(prompt)
+            analysis = result.final_output
+            
+            # Try to parse JSON response
+            try:
+                import json
+                # Extract JSON from the response (it might be wrapped in markdown)
+                if "```json" in analysis:
+                    json_start = analysis.find("```json") + 7
+                    json_end = analysis.find("```", json_start)
+                    json_str = analysis[json_start:json_end].strip()
+                else:
+                    json_str = analysis
+                
+                parsed_analysis = json.loads(json_str)
+                
+                # Convert to the format expected by the UI
+                relevant_pages = []
+                for page_analysis in parsed_analysis.get('relevant_pages', []):
+                    if page_analysis.get('belongs_to_subsection', False) and page_analysis.get('relevance_score', 0) >= 3:
+                        # Find the original page data
+                        original_page = None
+                        for page in all_pages:
+                            if page.get('title') == page_analysis.get('page_title'):
+                                original_page = page
+                                break
+                        
+                        if original_page:
+                            relevant_pages.append({
+                                'page_title': original_page.get('title', 'No title'),
+                                'url': original_page.get('actual_url', original_page.get('url', '')),
+                                'content': original_page.get('content', '')[:1000] + '...' if len(original_page.get('content', '')) > 1000 else original_page.get('content', ''),
+                                'screenshot_path': original_page.get('screenshot_path', ''),
+                                'screenshot_filename': original_page.get('screenshot_filename', ''),
+                                'relevance_score': page_analysis.get('relevance_score', 0),
+                                'word_count': original_page.get('word_count', 0),
+                                'ai_reasoning': page_analysis.get('reasoning', ''),
+                                'key_themes': page_analysis.get('key_themes', []),
+                                'supporting_quotes': page_analysis.get('supporting_quotes', []),
+                                'confidence': page_analysis.get('confidence', 'medium')
+                            })
+                
+                # Sort by relevance score
+                relevant_pages.sort(key=lambda x: x['relevance_score'], reverse=True)
+                return relevant_pages[:5]  # Return top 5 most relevant pages
+                
+            except Exception as e:
+                print(f"Error parsing AI response as JSON: {e}")
+                return []
+                
+        except Exception as e:
+            print(f"Error in section analysis: {e}")
+            return []
+
+
 class SectionBasedAnalyzer:
-    def __init__(self, sections_config_path: str = "settings/crawl_sections.json"):
+    def __init__(self, sections_config_path: str = "settings/crawl_sections.json", enable_link_filtering: bool = True):
         self.sections_config = self.load_sections_config(sections_config_path)
-        self.scraper = WebsiteScraper()
+        self.scraper = WebsiteScraper(enable_link_filtering=enable_link_filtering)
+        self.page_analyst = PageAnalystAgent()
         
     def load_sections_config(self, config_path: str) -> Dict:
         """Load the sections configuration from JSON file"""
@@ -289,18 +547,11 @@ class SectionBasedAnalyzer:
             return {"sections": []}
     
     def analyze_content_for_sections(self, scraped_data: List[Dict], organization_name: str = "") -> Dict:
-        """Analyze scraped content and organize it by sections"""
-        print("🔍 Analyzing content for sections...")
+        """Analyze scraped content and organize it by sections using AI section-centric analysis"""
+        print("🔍 Analyzing content for sections using AI section-centric analysis...")
         
-        # Prepare all content for analysis
-        all_content = ""
-        for page in scraped_data:
-            if 'content' in page and 'error' not in page:
-                all_content += f"\n\n--- Page: {page['title']} ({page['url']}) ---\n"
-                all_content += page['content']
-        
-        # Replace organization name placeholder
-        sections = []
+        # Prepare sections configuration
+        sections_config = []
         for section in self.sections_config.get('sections', []):
             section_name = section['section_name']
             if '[organization name]' in section_name and organization_name:
@@ -313,84 +564,263 @@ class SectionBasedAnalyzer:
                 if '[organization name]' in subsection_name and organization_name:
                     subsection_name = subsection_name.replace('[organization name]', organization_name)
                 
-                # Find relevant pages for this subsection
-                relevant_pages = self.find_relevant_pages(
-                    scraped_data, 
-                    subsection['subsection_definition'],
-                    subsection_name
+                subsections.append({
+                    'subsection_name': subsection_name,
+                    'subsection_definition': subsection['subsection_definition']
+                })
+            
+            sections_config.append({
+                'section_name': section_name,
+                'section_definition': section['section_definition'],
+                'subsections': subsections
+            })
+        
+        # Analyze each section and find relevant pages
+        sections = []
+        total_subsections = sum(len(section.get('subsections', [])) for section in sections_config)
+        current_subsection = 0
+        
+        for section_config in sections_config:
+            section_name = section_config['section_name']
+            section_definition = section_config['section_definition']
+            
+            print(f"\n📋 Analyzing section: {section_name}")
+            
+            # Process subsections
+            subsections = []
+            for subsection_config in section_config.get('subsections', []):
+                current_subsection += 1
+                subsection_name = subsection_config['subsection_name']
+                subsection_definition = subsection_config['subsection_definition']
+                
+                print(f"  🔍 Analyzing subsection {current_subsection}/{total_subsections}: {subsection_name}")
+                
+                # Use AI to find pages that belong to this subsection
+                relevant_pages = self.page_analyst.analyze_section_pages(
+                    section_config, 
+                    subsection_config, 
+                    scraped_data
                 )
                 
                 subsections.append({
                     'subsection_name': subsection_name,
-                    'subsection_definition': subsection['subsection_definition'],
+                    'subsection_definition': subsection_definition,
                     'relevant_pages': relevant_pages
                 })
+                
+                # Show progress
+                progress = (current_subsection / total_subsections) * 100
+                print(f"  🔄 Analysis Progress: {progress:.1f}%")
+            
+            # Calculate section-level statistics
+            total_pages = sum(len(subsection.get('relevant_pages', [])) for subsection in subsections)
+            avg_relevance = 0
+            if total_pages > 0:
+                all_scores = []
+                for subsection in subsections:
+                    for page in subsection.get('relevant_pages', []):
+                        all_scores.append(page.get('relevance_score', 0))
+                avg_relevance = sum(all_scores) / len(all_scores) if all_scores else 0
             
             sections.append({
                 'section_name': section_name,
-                'section_definition': section['section_definition'],
-                'subsections': subsections
+                'section_definition': section_definition,
+                'subsections': subsections,
+                'total_relevant_pages': total_pages,
+                'average_relevance_score': round(avg_relevance, 2),
+                'coverage_quality': 'excellent' if avg_relevance >= 7 else 'good' if avg_relevance >= 4 else 'limited'
             })
         
         return {
             'organization_name': organization_name,
             'sections': sections,
             'total_pages_scraped': len(scraped_data),
-            'analysis_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            'analysis_timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'analysis_method': 'AI Section-Centric Analyst'
         }
     
-    def find_relevant_pages(self, scraped_data: List[Dict], subsection_definition: str, subsection_name: str) -> List[Dict]:
-        """Find pages relevant to a specific subsection"""
-        relevant_pages = []
-        
-        # Simple keyword-based matching (can be enhanced with AI)
-        keywords = self.extract_keywords(subsection_definition, subsection_name)
-        
-        for page in scraped_data:
-            if 'error' in page:
-                continue
-                
-            content = page.get('content', '').lower()
-            title = page.get('title', '').lower()
+
+
+class LinkRelevanceAgent:
+    def __init__(self):
+        self.agent = Agent(
+            name="LinkRelevanceAnalyst",
+            instructions="""
+            You are a specialized AI agent that determines whether a link is worth checking based on its context and URL.
             
-            # Check if page contains relevant keywords
-            relevance_score = 0
-            for keyword in keywords:
-                if keyword in content or keyword in title:
-                    relevance_score += 1
+            Your task is to:
+            1. Analyze the URL structure and content to predict relevance
+            2. Consider the context where the link appears (surrounding text, page content)
+            3. Evaluate if the link might lead to content relevant to specific organizational sections
+            4. Provide a relevance score and detailed reasoning
             
-            if relevance_score > 0:
-                relevant_pages.append({
-                    'page_title': page.get('title', 'No title'),
-                    'url': page.get('actual_url', page.get('url', '')),
-                    'content': page.get('content', '')[:1000] + '...' if len(page.get('content', '')) > 1000 else page.get('content', ''),
-                    'screenshot_path': page.get('screenshot_path', ''),
-                    'screenshot_filename': page.get('screenshot_filename', ''),
-                    'relevance_score': relevance_score,
-                    'word_count': page.get('word_count', 0)
-                })
-        
-        # Sort by relevance score
-        relevant_pages.sort(key=lambda x: x['relevance_score'], reverse=True)
-        return relevant_pages[:5]  # Return top 5 most relevant pages
+            For each link evaluation, consider:
+            - URL path structure and keywords
+            - File extensions (avoid PDFs, images, etc. unless relevant)
+            - Context clues from surrounding text
+            - Likelihood of containing relevant organizational information
+            - Potential for finding information about specific sections like:
+              * General information and history
+              * Mission and societal impact
+              * Structure and research
+              * Working at the organization
+              * Living and working in the location
+            
+            Provide:
+            - Relevance score (1-10, where 10 is highly relevant)
+            - Detailed reasoning for your decision
+            - Confidence level (high/medium/low)
+            - Specific aspects that make it relevant or not
+            - Suggested priority level for crawling (high/medium/low)
+            
+            Be conservative but not overly restrictive. Prefer false positives over false negatives.
+            """
+        )
     
-    def extract_keywords(self, definition: str, name: str) -> List[str]:
-        """Extract keywords from subsection definition and name"""
-        text = f"{name} {definition}".lower()
-        
-        # Remove common words and extract meaningful keywords
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'about', 'over', 'under', 'through', 'during', 'before', 'after', 'above', 'below', 'up', 'down', 'out', 'off', 'again', 'further', 'then', 'once'}
-        
-        words = re.findall(r'\b\w+\b', text)
-        keywords = [word for word in words if len(word) > 3 and word not in stop_words]
-        
-        return list(set(keywords))  # Remove duplicates
+    def _run_agent_in_thread(self, prompt: str):
+        """Run the link relevance agent in a separate thread with its own event loop"""
+        import threading
+        import asyncio
+
+        result = [None]
+        error = [None]
+
+        def run_agent():
+            try:
+                # Create a new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                # Run the agent
+                result[0] = Runner.run_sync(self.agent, prompt)
+
+            except Exception as e:
+                error[0] = e
+                print(f"Error running link relevance agent: {e}")
+            finally:
+                if 'loop' in locals():
+                    loop.close()
+
+        # Run in a separate thread
+        thread = threading.Thread(target=run_agent)
+        thread.start()
+        thread.join()
+
+        if error[0]:
+            raise error[0]
+        return result[0]
+    
+    def evaluate_link_relevance(self, url: str, context: str = "", current_page_title: str = "", 
+                              current_page_content: str = "", target_sections: List[Dict] = None) -> Dict:
+        """Evaluate if a link is worth checking based on URL and context"""
+        try:
+            # Prepare context information
+            context_info = f"Current page title: {current_page_title}\n"
+            context_info += f"Context around link: {context}\n"
+            context_info += f"Current page content preview: {current_page_content[:500]}...\n"
+            
+            # Add target sections if provided
+            sections_info = ""
+            if target_sections:
+                sections_info = "\nTarget sections to look for:\n"
+                for section in target_sections:
+                    sections_info += f"- {section.get('section_name', '')}: {section.get('section_definition', '')}\n"
+                    for subsection in section.get('subsections', []):
+                        sections_info += f"  - {subsection.get('subsection_name', '')}: {subsection.get('subsection_definition', '')}\n"
+            
+            prompt = f"""
+            Evaluate the relevance of this link for organizational information gathering:
+            
+            URL: {url}
+            
+            {context_info}
+            
+            {sections_info}
+            
+            Please analyze this link and provide:
+            1. Relevance score (1-10)
+            2. Detailed reasoning for your decision
+            3. Confidence level (high/medium/low)
+            4. Specific aspects that make it relevant or not
+            5. Priority level for crawling (high/medium/low)
+            6. Predicted content type based on URL structure
+            7. Key indicators that suggest relevance
+            
+            Format your response as JSON:
+            {{
+                "url": "{url}",
+                "relevance_score": 7,
+                "reasoning": "Detailed explanation of why this link is relevant...",
+                "confidence": "high",
+                "priority": "medium",
+                "predicted_content_type": "About page or organizational information",
+                "key_indicators": ["about", "organization", "mission"],
+                "is_worth_checking": true
+            }}
+            """
+            
+            print(f"🔍 Evaluating link relevance: {url}")
+            result = self._run_agent_in_thread(prompt)
+            analysis = result.final_output
+            
+            # Try to parse JSON response
+            try:
+                import json
+                # Extract JSON from the response (it might be wrapped in markdown)
+                if "```json" in analysis:
+                    json_start = analysis.find("```json") + 7
+                    json_end = analysis.find("```", json_start)
+                    json_str = analysis[json_start:json_end].strip()
+                else:
+                    json_str = analysis
+                
+                parsed_analysis = json.loads(json_str)
+                
+                # Ensure all required fields are present
+                return {
+                    'url': url,
+                    'relevance_score': parsed_analysis.get('relevance_score', 0),
+                    'reasoning': parsed_analysis.get('reasoning', 'No reasoning provided'),
+                    'confidence': parsed_analysis.get('confidence', 'medium'),
+                    'priority': parsed_analysis.get('priority', 'low'),
+                    'predicted_content_type': parsed_analysis.get('predicted_content_type', 'Unknown'),
+                    'key_indicators': parsed_analysis.get('key_indicators', []),
+                    'is_worth_checking': parsed_analysis.get('is_worth_checking', False)
+                }
+                
+            except Exception as e:
+                print(f"Error parsing link relevance response as JSON: {e}")
+                # Fallback to basic analysis
+                return {
+                    'url': url,
+                    'relevance_score': 5,
+                    'reasoning': f"Could not parse AI response: {analysis}",
+                    'confidence': 'low',
+                    'priority': 'low',
+                    'predicted_content_type': 'Unknown',
+                    'key_indicators': [],
+                    'is_worth_checking': True  # Default to checking if we can't parse
+                }
+                
+        except Exception as e:
+            print(f"Error in link relevance evaluation: {e}")
+            return {
+                'url': url,
+                'relevance_score': 5,
+                'reasoning': f"Error during evaluation: {str(e)}",
+                'confidence': 'low',
+                'priority': 'low',
+                'predicted_content_type': 'Unknown',
+                'key_indicators': [],
+                'is_worth_checking': True  # Default to checking on error
+            }
 
 
 class UniversityInfoAgent:
     def __init__(self):
         self.scraper = WebsiteScraper()
         self.section_analyzer = SectionBasedAnalyzer()
+        self.link_relevance_agent = LinkRelevanceAgent()
         self.agent = Agent(
             name="University Information Collector",
             instructions="""
@@ -409,8 +839,14 @@ class UniversityInfoAgent:
             9. Research opportunities
             10. Student life and activities
             
-            Always provide verbatim quotes from the source material when possible.
-            Organize the information in a clear, structured format.
+            For each piece of information you extract:
+            - Provide verbatim quotes from the source material when possible
+            - Explain why this information is relevant to the specific section
+            - Include the source URL and page title for reference
+            - Rate the confidence level of the information (high/medium/low)
+            - Note any potential biases or limitations in the source
+            
+            Organize the information in a clear, structured format with proper reasoning for each categorization.
             """
         )
     
@@ -451,8 +887,33 @@ class UniversityInfoAgent:
         """Main method to collect university information with section-based analysis"""
         print(f"Starting to collect information from: {university_url}")
         
-        # Scrape the website
-        scraped_data = self.scraper.crawl_website(university_url, max_pages)
+        # Prepare sections configuration for link relevance evaluation
+        sections_config = []
+        for section in self.section_analyzer.sections_config.get('sections', []):
+            section_name = section['section_name']
+            if '[organization name]' in section_name and organization_name:
+                section_name = section_name.replace('[organization name]', organization_name)
+            
+            # Process subsections
+            subsections = []
+            for subsection in section.get('subsection', []):
+                subsection_name = subsection['subsection_name']
+                if '[organization name]' in subsection_name and organization_name:
+                    subsection_name = subsection_name.replace('[organization name]', organization_name)
+                
+                subsections.append({
+                    'subsection_name': subsection_name,
+                    'subsection_definition': subsection['subsection_definition']
+                })
+            
+            sections_config.append({
+                'section_name': section_name,
+                'section_definition': section['section_definition'],
+                'subsections': subsections
+            })
+        
+        # Scrape the website with target sections for link relevance evaluation
+        scraped_data = self.scraper.crawl_website(university_url, max_pages, sections_config)
         
         # Extract organization name from first page if not provided
         if not organization_name and scraped_data:
@@ -489,7 +950,16 @@ class UniversityInfoAgent:
         Content to analyze:
         {combined_content}
         
-        Please provide a comprehensive analysis with verbatim quotes where relevant.
+        For your analysis, please:
+        1. Extract information and organize it by relevant categories
+        2. For each piece of information, explain WHY it belongs to that category
+        3. Provide verbatim quotes from the source material
+        4. Include confidence levels (high/medium/low) for each piece of information
+        5. Note the source URL and page title for each piece of information
+        6. Identify any potential gaps or missing information
+        7. Suggest which sections might need more detailed analysis
+        
+        Focus on providing clear reasoning for your categorization decisions.
         """
         
         try:

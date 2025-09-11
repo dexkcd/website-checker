@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 import pandas as pd
 from config import PAGE_TITLE, PAGE_ICON, OPENAI_API_KEY
+from translation_utils import TranslationManager, LANGUAGE_OPTIONS, get_language_name
 
 # Try to import the main scraper, fallback to simple scraper if there are issues
 try:
@@ -66,44 +67,137 @@ def check_api_key():
         return False
     return True
 
-def display_section_analysis(section_analysis):
-    """Display the section-based analysis results"""
+def display_section_analysis(section_analysis, target_lang_code='en', enable_translation=False):
+    """Display the section-based analysis results with optional translation"""
     sections = section_analysis.get('sections', [])
     
+    # Initialize translation manager if needed
+    translator = None
+    if enable_translation and target_lang_code != 'en':
+        translator = TranslationManager()
+    
     for i, section in enumerate(sections):
-        st.markdown(f"### {i+1}. {section['section_name']}")
-        st.markdown(f"*{section['section_definition']}*")
+        section_name = section['section_name']
+        section_definition = section['section_definition']
+        
+        # Translate if needed
+        if translator and target_lang_code != 'en':
+            section_name = translator.translate_text(section_name, target_lang_code)
+            section_definition = translator.translate_text(section_definition, target_lang_code)
+        
+        st.markdown(f"### {i+1}. {section_name}")
+        st.markdown(f"*{section_definition}*")
+        
+        # Show section-level statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Relevant Pages", section.get('total_relevant_pages', 0))
+        with col2:
+            st.metric("Avg Relevance Score", section.get('average_relevance_score', 0))
+        with col3:
+            coverage_quality = section.get('coverage_quality', 'unknown')
+            if coverage_quality == 'excellent':
+                st.success(f"📊 Coverage: {coverage_quality.title()}")
+            elif coverage_quality == 'good':
+                st.info(f"📊 Coverage: {coverage_quality.title()}")
+            else:
+                st.warning(f"📊 Coverage: {coverage_quality.title()}")
         
         subsections = section.get('subsections', [])
         for j, subsection in enumerate(subsections):
-            st.markdown(f"#### {i+1}.{j+1} {subsection['subsection_name']}")
-            st.markdown(f"*{subsection['subsection_definition']}*")
+            subsection_name = subsection['subsection_name']
+            subsection_definition = subsection['subsection_definition']
+            
+            # Translate if needed
+            if translator and target_lang_code != 'en':
+                subsection_name = translator.translate_text(subsection_name, target_lang_code)
+                subsection_definition = translator.translate_text(subsection_definition, target_lang_code)
+            
+            st.markdown(f"#### {i+1}.{j+1} {subsection_name}")
+            st.markdown(f"*{subsection_definition}*")
             
             relevant_pages = subsection.get('relevant_pages', [])
+            
+            # Show subsection statistics
             if relevant_pages:
+                subsection_avg_score = sum(page.get('relevance_score', 0) for page in relevant_pages) / len(relevant_pages)
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Pages Found", len(relevant_pages))
+                with col2:
+                    st.metric("Avg Score", f"{subsection_avg_score:.1f}")
+                
+                # Display relevant pages
                 for k, page in enumerate(relevant_pages):
-                    with st.expander(f"📄 {page['page_title']} (Relevance: {page['relevance_score']})"):
+                    page_title = page['page_title']
+                    page_content = page['content']
+                    
+                    # Translate if needed
+                    if translator and target_lang_code != 'en':
+                        page_title = translator.translate_text(page_title, target_lang_code)
+                        page_content = translator.translate_text(page_content, target_lang_code)
+                    
+                    with st.expander(f"📄 {page_title} (Relevance: {page['relevance_score']})"):
                         col1, col2 = st.columns([2, 1])
                         
                         with col1:
                             st.markdown(f"**URL:** {page['url']}")
                             st.markdown(f"**Word Count:** {page['word_count']}")
+                            
+                            # Show AI reasoning
+                            if page.get('ai_reasoning'):
+                                st.markdown("**🤖 AI Analysis:**")
+                                st.info(page['ai_reasoning'])
+                            
+                            # Show key themes
+                            if page.get('key_themes'):
+                                st.markdown("**🎯 Key Themes:**")
+                                themes_display = ", ".join(page['key_themes'][:5])
+                                if len(page['key_themes']) > 5:
+                                    themes_display += f" (+{len(page['key_themes']) - 5} more)"
+                                st.markdown(f"`{themes_display}`")
+                            
+                            # Show supporting quotes
+                            if page.get('supporting_quotes'):
+                                with st.expander("📝 Supporting Quotes"):
+                                    for quote in page['supporting_quotes'][:3]:
+                                        st.markdown(f"• \"{quote}\"")
+                                    if len(page['supporting_quotes']) > 3:
+                                        st.markdown(f"... and {len(page['supporting_quotes']) - 3} more quotes")
+                            
+                            # Show confidence level
+                            if page.get('confidence'):
+                                confidence = page['confidence']
+                                if confidence == 'high':
+                                    st.success(f"🎯 Confidence: {confidence.title()}")
+                                elif confidence == 'medium':
+                                    st.info(f"🎯 Confidence: {confidence.title()}")
+                                else:
+                                    st.warning(f"🎯 Confidence: {confidence.title()}")
+                            
+                            # Show translation status
+                            if translator and target_lang_code != 'en':
+                                st.markdown(f"🌐 **Translated to {get_language_name(target_lang_code)}**")
+                            
                             st.markdown("**Content:**")
-                            st.text_area("", page['content'], height=200, key=f"content_{i}_{j}_{k}")
+                            st.text_area("", page_content, height=200, key=f"content_{i}_{j}_{k}")
                         
                         with col2:
                             if page.get('screenshot_path') and os.path.exists(page['screenshot_path']):
                                 st.markdown("**Screenshot:**")
-                                st.image(page['screenshot_path'], caption=page['page_title'], use_column_width=True)
+                                st.image(page['screenshot_path'], caption=page_title, use_container_width=True)
                             else:
                                 st.markdown("📷 *Screenshot not available*")
             else:
-                st.info("No relevant pages found for this subsection.")
+                no_pages_msg = "No relevant pages found for this subsection."
+                if translator and target_lang_code != 'en':
+                    no_pages_msg = translator.translate_text(no_pages_msg, target_lang_code)
+                st.info(no_pages_msg)
         
         st.markdown("---")
 
-def display_results(data):
-    """Display the collected university information"""
+def display_results(data, target_lang_code='en', enable_translation=False):
+    """Display the collected university information with optional translation"""
     st.markdown("## 📊 Collection Results")
     
     # Summary metrics
@@ -123,10 +217,44 @@ def display_results(data):
     if data.get('organization_name'):
         st.markdown(f"### 🏢 {data['organization_name']}")
     
+    # Translation status
+    if enable_translation and target_lang_code != 'en':
+        st.info(f"🌐 Content is being translated to {get_language_name(target_lang_code)}")
+    
     # Section-based analysis
     if 'section_analysis' in data:
         st.markdown("## 📋 Section-Based Analysis")
-        display_section_analysis(data['section_analysis'])
+        
+        # Show overall analysis summary
+        section_analysis = data['section_analysis']
+        sections = section_analysis.get('sections', [])
+        analysis_method = section_analysis.get('analysis_method', 'Unknown')
+        
+        # Show analysis method
+        if analysis_method == 'AI Section-Centric Analyst':
+            st.success("🤖 Analysis powered by AI Section-Centric Analyst")
+        elif analysis_method == 'AI Page Analyst':
+            st.success("🤖 Analysis powered by AI Page Analyst")
+        else:
+            st.info(f"📊 Analysis method: {analysis_method}")
+        
+        if sections:
+            total_sections = len(sections)
+            sections_with_content = len([s for s in sections if s.get('total_relevant_pages', 0) > 0])
+            overall_avg_score = sum(s.get('average_relevance_score', 0) for s in sections) / total_sections if total_sections > 0 else 0
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Sections", total_sections)
+            with col2:
+                st.metric("Sections with Content", sections_with_content)
+            with col3:
+                st.metric("Overall Avg Score", f"{overall_avg_score:.1f}")
+            with col4:
+                coverage_pct = (sections_with_content / total_sections * 100) if total_sections > 0 else 0
+                st.metric("Coverage %", f"{coverage_pct:.0f}%")
+        
+        display_section_analysis(data['section_analysis'], target_lang_code, enable_translation)
     
     # Traditional analysis
     if 'traditional_analysis' in data:
@@ -174,8 +302,20 @@ def display_results(data):
     
     with tab2:
         # Display full content for each page
+        translator = None
+        if enable_translation and target_lang_code != 'en':
+            translator = TranslationManager()
+        
         for i, page in enumerate(data['raw_data']):
-            with st.expander(f"Page {i+1}: {page.get('title', 'No title')}"):
+            page_title = page.get('title', 'No title')
+            page_content = page.get('content', '')
+            
+            # Translate if needed
+            if translator and target_lang_code != 'en':
+                page_title = translator.translate_text(page_title, target_lang_code)
+                page_content = translator.translate_text(page_content, target_lang_code)
+            
+            with st.expander(f"Page {i+1}: {page_title}"):
                 if 'error' not in page:
                     col1, col2 = st.columns([2, 1])
                     
@@ -187,13 +327,18 @@ def display_results(data):
                             st.write(f"**Actual URL Loaded:** {page.get('actual_url', '')}")
                         st.write(f"**Word Count:** {page.get('word_count', 0)}")
                         st.write(f"**Scraped At:** {page.get('scraped_at', '')}")
+                        
+                        # Show translation status
+                        if translator and target_lang_code != 'en':
+                            st.write(f"🌐 **Translated to {get_language_name(target_lang_code)}**")
+                        
                         st.write("**Content:**")
-                        st.text_area("", page.get('content', ''), height=200, key=f"content_{i}")
+                        st.text_area("", page_content, height=200, key=f"content_{i}")
                     
                     with col2:
                         if page.get('screenshot_path') and os.path.exists(page.get('screenshot_path')):
                             st.write("**Screenshot:**")
-                            st.image(page.get('screenshot_path'), caption=page.get('title', 'No title'), use_column_width=True)
+                            st.image(page.get('screenshot_path'), caption=page_title, use_container_width=True)
                         else:
                             st.write("📷 *Screenshot not available*")
                 else:
@@ -248,8 +393,10 @@ def main():
         # Show scraper type
         if SCRAPER_TYPE == "playwright":
             st.success("🕷️ Using Playwright scraper (JavaScript support)")
+            st.info("🤖 LinkRelevanceAgent enabled - AI-powered link filtering")
         else:
             st.info("🌐 Using Requests scraper (fallback mode)")
+            st.warning("⚠️ LinkRelevanceAgent not available in fallback mode")
         
         # University URL input
         university_url = st.text_input(
@@ -274,6 +421,36 @@ def main():
             help="Limit the number of pages to scrape to avoid overwhelming the server"
         )
         
+        # Translation options
+        st.markdown("### 🌐 Translation Options")
+        
+        # Check if translation is available
+        try:
+            from translation_utils import TranslationManager
+            test_translator = TranslationManager()
+            translation_available = True
+        except Exception as e:
+            translation_available = False
+            st.warning(f"⚠️ Translation not available: {str(e)}")
+        
+        if translation_available:
+            enable_translation = st.checkbox("Enable Translation", value=False, help="Translate content to another language")
+            
+            if enable_translation:
+                target_language = st.selectbox(
+                    "Target Language",
+                    options=list(LANGUAGE_OPTIONS.keys()),
+                    index=0,  # Default to English
+                    help="Select the language to translate content to"
+                )
+                target_lang_code = LANGUAGE_OPTIONS[target_language]
+            else:
+                target_lang_code = 'en'
+        else:
+            enable_translation = False
+            target_lang_code = 'en'
+            st.info("🌐 Translation feature is not available. Content will be displayed in original language.")
+        
         # Advanced options
         st.markdown("### 🔧 Advanced Options")
         show_raw_data = st.checkbox("Show Raw Data", value=True, help="Display raw scraped content")
@@ -285,7 +462,8 @@ def main():
         This tool uses AI to collect and analyze information from university websites.
         
         **Features:**
-        - Intelligent web scraping
+        - Intelligent web scraping with Playwright
+        - AI-powered link relevance filtering
         - AI-powered content analysis
         - Structured data extraction
         - Export to JSON/CSV
@@ -341,7 +519,7 @@ def main():
         
         # Display results if available
         if 'collection_results' in st.session_state:
-            display_results(st.session_state['collection_results'])
+            display_results(st.session_state['collection_results'], target_lang_code, enable_translation)
     
     else:
         # Welcome message

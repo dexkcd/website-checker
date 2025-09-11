@@ -5,8 +5,12 @@ An AI-powered tool that uses the OpenAI Agents SDK to collect and analyze inform
 ## Features
 
 - 🤖 **AI-Powered Analysis**: Uses OpenAI Agents SDK for intelligent content extraction
+- 🎯 **LinkRelevanceAgent**: AI-powered link filtering to focus on relevant content before crawling
 - 🕷️ **Smart Web Scraping**: Playwright-powered crawling with requests fallback for maximum compatibility
 - 📊 **Structured Data**: Organizes information into clear categories
+- 📸 **Visual Screenshots**: Captures full-page screenshots for visual reference
+- 🎯 **Section-Based Analysis**: Categorizes content by predefined sections (mission, structure, etc.)
+- 🌐 **Translation Support**: Built-in translation capabilities with fallback mode
 - 💾 **Export Options**: Download results as JSON or CSV
 - 🎨 **Modern UI**: Clean, intuitive Streamlit interface
 - ⚡ **Real-time Progress**: Live updates during collection process
@@ -107,8 +111,21 @@ The application can be configured through the `config.py` file:
 
 ### AI Agent Features
 
-The OpenAI agent is configured with specialized instructions for university website analysis:
+The application includes multiple specialized AI agents:
 
+**LinkRelevanceAgent**
+- Evaluates links before crawling to determine relevance
+- Analyzes URL structure, context, and target sections
+- Provides relevance scores and reasoning for each link
+- Reduces noise by filtering out irrelevant pages
+
+**PageAnalystAgent**
+- Analyzes page content for section relevance
+- Provides detailed reasoning for categorization decisions
+- Extracts key themes and supporting quotes
+- Scores pages on relevance to specific organizational sections
+
+**UniversityInfoAgent**
 - Extracts relevant information from unstructured content
 - Provides verbatim quotes when possible
 - Organizes data into structured categories
