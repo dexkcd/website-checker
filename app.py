@@ -393,10 +393,8 @@ def main():
         # Show scraper type
         if SCRAPER_TYPE == "playwright":
             st.success("🕷️ Using Playwright scraper (JavaScript support)")
-            st.info("🤖 LinkRelevanceAgent enabled - AI-powered link filtering")
         else:
             st.info("🌐 Using Requests scraper (fallback mode)")
-            st.warning("⚠️ LinkRelevanceAgent not available in fallback mode")
         
         # University URL input
         university_url = st.text_input(
@@ -463,7 +461,6 @@ def main():
         
         **Features:**
         - Intelligent web scraping with Playwright
-        - AI-powered link relevance filtering
         - AI-powered content analysis
         - Structured data extraction
         - Export to JSON/CSV

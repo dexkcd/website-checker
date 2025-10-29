@@ -15,7 +15,7 @@ from config import (
 
 
 class WebsiteScraper:
-    def __init__(self, screenshots_dir: str = "screenshots", enable_link_filtering: bool = True):
+    def __init__(self, screenshots_dir: str = "screenshots", enable_link_filtering: bool = False):
         self.visited_urls: Set[str] = set()
         self.scraped_data: List[Dict] = []
         self.playwright = None
@@ -529,7 +529,7 @@ class PageAnalystAgent:
 
 
 class SectionBasedAnalyzer:
-    def __init__(self, sections_config_path: str = "settings/crawl_sections.json", enable_link_filtering: bool = True):
+    def __init__(self, sections_config_path: str = "settings/crawl_sections.json", enable_link_filtering: bool = False):
         self.sections_config = self.load_sections_config(sections_config_path)
         self.scraper = WebsiteScraper(enable_link_filtering=enable_link_filtering)
         self.page_analyst = PageAnalystAgent()
